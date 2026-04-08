@@ -158,7 +158,7 @@ def groq_response(prompt: str):
 # -----------------------------
 @app.get("/")
 def root():
-    return {"message": "Welcome to theFastAPI + JWT + RAG + Groq demo!"}
+    return {"message": "Welcome to FastAPI + JWT + RAG + Groq!"}
 
 @app.post("/login")
 def login(request: LoginRequest):
