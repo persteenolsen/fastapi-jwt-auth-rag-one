@@ -1,0 +1,12 @@
+groq
+fastapi
+uvicorn
+python-dotenv
+
+PyJWT
+
+sqlalchemy
+psycopg2-binary
+pgvector
+
+numpy
