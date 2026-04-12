@@ -1,45 +1,40 @@
 # app.py
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import uvicorn
-from dotenv import load_dotenv
-import os
 from pydantic import BaseModel
-from groq import Groq
 from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+from groq import Groq
 import numpy as np
 import jwt
+import os
+import requests
+import datetime
 
 # -----------------------------
-# Load environment
+# ENV
 # -----------------------------
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# 08-04-2026: Updated to use environment variable for JWT secret key
-# SECRET_KEY = os.getenv("JWT_SECRET_KEY", "mysecret")
-SECRET_KEY = os.getenv("SECRET_KEY")
-
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not GROQ_API_KEY or not DATABASE_URL:
-    raise Exception("GROQ_API_KEY or DATABASE_URL not set")
-
-# 08-04-2026: Updated to use environment variables for credentials
-FAKE_USERNAME=os.getenv("FAKE_USERNAME")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
+FAKE_USERNAME = os.getenv("FAKE_USERNAME")
 FAKE_PASSWORD = os.getenv("FAKE_PASSWORD")
 
-# -----------------------------
-# FastAPI Setup & Groq Client
-# -----------------------------
-# app = FastAPI(title="Groq + RAG + JWT Demo")
+if not DATABASE_URL:
+    raise Exception("Missing DATABASE_URL")
 
-# Initialize the FastAPI app
+# -----------------------------
+# APP
+# -----------------------------
+# app = FastAPI(title="FastAPI with JWT Auth and RAG")
+
+# 11-04-2026 - Initialize the FastAPI app
 app = FastAPI(
 
-    title="Python + FastApi + JWT Auth + RAG + LLM + Groq",
-    description="08-04-2026 - FastAPI with JWT Auth serving an RAG Application powered by one of Groq's LLaMA models",
+    title="Python + FastApi + JWT Auth + LLM + Groq + RAG pipeline",
+    description="12-04-2026 - FastAPI with JWT Auth serving an RAG Application powered by one of Groq's LLaMA models",
     version="0.0.1",
 
     contact={
@@ -48,26 +43,24 @@ app = FastAPI(
          },
 )
 
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 client = Groq(api_key=GROQ_API_KEY)
-engine = create_engine(DATABASE_URL)
 
 # -----------------------------
-# Security: HTTP Bearer for Swagger UI
+# AUTH
 # -----------------------------
-bearer_scheme = HTTPBearer()  # This enables the "Authorize" button
+bearer = HTTPBearer()
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)):
-    token = credentials.credentials
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
     try:
-        decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        decoded = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
         return decoded["username"]
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.JWTError:
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # -----------------------------
-# Pydantic Models
+# MODELS
 # -----------------------------
 class LoginRequest(BaseModel):
     username: str
@@ -76,136 +69,220 @@ class LoginRequest(BaseModel):
 class PromptRequest(BaseModel):
     prompt: str
 
-class DocumentRequest(BaseModel):
-    content: str
+class URLRequest(BaseModel):
+    url: str
 
 # -----------------------------
-# Embeddings & RAG
+# EMBEDDING CONFIG
 # -----------------------------
-def simple_embedding(text: str):
-    np.random.seed(abs(hash(text)) % (10**6))
-    return np.random.rand(384).tolist()
+# NOTE: fake embeddings for demo purposes only
+EMBED_MODEL = "mock-384"   # since you're still using fake embeddings
+EMBED_VERSION = 1
 
+# -----------------------------
+# UTILS
+# -----------------------------
+def normalize(vec):
+    v = np.array(vec)
+    return (v / np.linalg.norm(v)).tolist()
+
+def embed_batch(texts: list[str]) -> list[list[float]]:
+    # 🔥 Replace with actual Groq embedding model when available
+    # TEMP fallback (deterministic fake but stable)
+    vectors = []
+    for text in texts:
+        np.random.seed(abs(hash(text)) % (10**6))
+        vec = np.random.rand(384)
+        vectors.append(normalize(vec))
+    return vectors
+
+# -----------------------------
+# DB INIT
+# -----------------------------
 def init_db():
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS documents (
                 id SERIAL PRIMARY KEY,
-                content TEXT UNIQUE,
-                embedding VECTOR(384)
+                content TEXT,
+                embedding VECTOR(384),
+                source TEXT,
+                embedding_model TEXT,
+                embedding_version INT,
+                created_at TIMESTAMP DEFAULT NOW()
             );
         """))
-        conn.commit()
 
-def seed_data():
-    docs = [
-        "FastAPI is a modern web framework for building APIs with Python.",
-        "JWT stands for JSON Web Token and is used for authentication.",
-        "RAG stands for Retrieval-Augmented Generation.",
-        "Neon provides serverless PostgreSQL with autoscaling.",
-        "pgvector allows storing and querying embeddings in PostgreSQL."
-    ]
-    with engine.connect() as conn:
-        for doc in docs:
-            # Check if document already exists
-            existing_doc = conn.execute(
-                text("SELECT 1 FROM documents WHERE content = :content LIMIT 1"),
-                {"content": doc}
-            ).fetchone()
-            
-            if not existing_doc:
-                # Insert only if the document does not exist
-                emb = simple_embedding(doc)
-                emb_str = "ARRAY[" + ",".join(map(str, emb)) + "]::vector"
-                conn.execute(
-                    text(f"INSERT INTO documents (content, embedding) VALUES (:content, {emb_str})"),
-                    {"content": doc}
-                )
-        conn.commit()
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS documents_embedding_idx
+            ON documents
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
+        """))
 
-# 07-04-2026 - top_k parameter controls the number of retrieved documents from the PostgreSQL 
-# ( Here were are taking the 5 documents with the closest embeddings to the query embedding )
-def retrieve_context(query: str, top_k: int = 5):
-    query_emb = simple_embedding(query)
-    query_emb_str = "ARRAY[" + ",".join(map(str, query_emb)) + "]::vector"
-    with engine.connect() as conn:
-        result = conn.execute(
-            text(f"""
-                SELECT content
+# -----------------------------
+# CHUNKING
+# -----------------------------
+def chunk_txt(text: str, size=500, overlap=50):
+    chunks = []
+    i = 0
+    while i < len(text):
+        chunk = text[i:i+size]
+        chunks.append(chunk.strip())
+        i += size - overlap
+    return chunks
+
+# -----------------------------
+# FETCH TEXT
+# -----------------------------
+def fetch_txt_clean(url: str) -> str:
+    try:
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request failed")
+
+    if res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to fetch URL")
+
+    content_type = res.headers.get("Content-Type", "")
+
+    if not ("text/plain" in content_type or url.endswith(".txt")):
+        raise HTTPException(status_code=400, detail="URL must be .txt")
+
+    lines = [line.strip() for line in res.text.splitlines() if line.strip()]
+    return "\n".join(lines)
+
+# -----------------------------
+# BACKGROUND WORKER
+# -----------------------------
+def process_chunks(chunks: list[str], source: str):
+    embeddings = embed_batch(chunks)
+
+    with engine.begin() as conn:
+        for chunk, vec in zip(chunks, embeddings):
+            conn.execute(
+                text("""
+                    INSERT INTO documents 
+                    (content, embedding, source, embedding_model, embedding_version)
+                    VALUES (:content, CAST(:embedding AS vector), :source, :model, :version)
+                """),
+                {
+                    "content": chunk,
+                    "embedding": vec,
+                    "source": source,
+                    "model": EMBED_MODEL,
+                    "version": EMBED_VERSION
+                }
+            )
+
+# -----------------------------
+# RETRIEVAL
+# -----------------------------
+def retrieve(query: str, k: int = 5):
+    qvec = embed_batch([query])[0]
+
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT content, source
                 FROM documents
-                ORDER BY embedding <-> {query_emb_str}
+                ORDER BY embedding <-> CAST(:embedding AS vector)
                 LIMIT :k
             """),
-            {"k": top_k}
-        )
-        return [row[0] for row in result.fetchall()]
+            {"embedding": qvec, "k": k}
+        ).fetchall()
 
-def groq_response(prompt: str):
-    response = client.chat.completions.create(
-        model="allam-2-7b",
+    return [{"content": r[0], "source": r[1]} for r in rows]
+
+# -----------------------------
+# LLM
+# -----------------------------
+def llm(prompt: str):
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=1000,
-        temperature=0.7
+        temperature=0.7,
+        max_tokens=800,
     )
-    return response.choices[0].message.content
+    return res.choices[0].message.content
 
 # -----------------------------
-# API Routes
+# ROUTES
 # -----------------------------
 @app.get("/")
 def root():
-    return {"message": "Welcome to FastAPI + JWT + RAG + Groq!"}
+    return {"status": "ok"}
+
+# DEBUG route to test retrieval without auth or LLM
+@app.post("/debug/retrieve")
+def debug(req: PromptRequest):
+    return retrieve(req.prompt)
 
 @app.post("/login")
-def login(request: LoginRequest):
-    
-    # Simple demo authentication
-    # 08-04-2026: Updated to use environment variables for credentials
-    # if request.username == "admin" and request.password == "password123":
-    if request.username == FAKE_USERNAME and request.password == FAKE_PASSWORD:
-        token = jwt.encode({"username": request.username}, SECRET_KEY, algorithm="HS256")
+def login(req: LoginRequest):
+    if req.username == FAKE_USERNAME and req.password == FAKE_PASSWORD:
+        payload = {
+            "username": req.username,
+            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        }
+        token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
         return {"token": token}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
 
-@app.post("/api/generate-response")
-def generate_response(request: PromptRequest, user: str = Depends(verify_token)):
-    try:
-        context_docs = retrieve_context(request.prompt)
-        prompt = f"Context:\n{chr(10).join(context_docs)}\nQuestion:\n{request.prompt}"
-        response = groq_response(prompt)
-        return {"response": response, "context_used": context_docs}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=401, detail="Bad credentials")
 
-@app.post("/api/add-document")
-def add_document(request: DocumentRequest, user: str = Depends(verify_token)):
-    try:
-        emb = simple_embedding(request.content)
-        emb_str = "ARRAY[" + ",".join(map(str, emb)) + "]::vector"
-        with engine.connect() as conn:
-            conn.execute(
-                text(f"INSERT INTO documents (content, embedding) VALUES (:content, {emb_str})"),
-                {"content": request.content}
-            )
-            conn.commit()
-        return {"message": "Document added successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/ask")
+def ask(req: PromptRequest, user=Depends(verify_token)):
+    docs = retrieve(req.prompt)
+
+    # 11-04-2026 - DEBUG / LEARNING LOGGING
+    print("\n=== RETRIEVAL DEBUG ===")
+    print(f"Query: {req.prompt}\n")
+
+    for i, d in enumerate(docs):
+        print(f"[{i}] SOURCE: {d['source']}")
+        print(f"CONTENT: {d['content'][:200]}")
+        print("------------------------")
+
+    context = "\n\n".join(
+        f"{d['content']} (source: {d['source']})"
+        for d in docs
+    )
+
+    prompt = f"""
+Context:
+{context}
+
+Question:
+{req.prompt}
+"""
+
+    answer = llm(prompt)
+
+    return {
+        "answer": answer,
+        "sources": list(set(d["source"] for d in docs))
+    }
+
+@app.post("/ingest")
+def ingest(req: URLRequest, background_tasks: BackgroundTasks, user=Depends(verify_token)):
+    clean_text = fetch_txt_clean(req.url)
+    chunks = chunk_txt(clean_text)
+
+    background_tasks.add_task(process_chunks, chunks, req.url)
+
+    return {
+        "message": "Processing started",
+        "chunks": len(chunks)
+    }
 
 # -----------------------------
-# Startup Event
+# STARTUP
 # -----------------------------
 @app.on_event("startup")
 def startup():
     init_db()
-    seed_data()
-
-# -----------------------------
-# Run server
-# -----------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
