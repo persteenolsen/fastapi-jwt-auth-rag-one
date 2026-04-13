@@ -1,4 +1,4 @@
-# Python + FastAPI + JWT Auth + RAG + LLM + Groq
+# Python + FastAPI + JWT Auth + RAG + Fake embeddings
 
 A REST API that serves:
 
@@ -6,13 +6,17 @@ A REST API that serves:
 
 - JWT Auth
 
-- a RAG Application using a LLP by Groq
+- A RAG Application
+
+- Using a LLP by Groq
+
+- Fake embeddings instead of a real embedding model
 
 - Swagger / OpenAPI
 
 Last updated:
 
-- 08-04-2026
+- 13-04-2026
 
 Python Version:
 
