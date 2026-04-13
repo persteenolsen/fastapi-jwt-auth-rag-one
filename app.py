@@ -76,7 +76,7 @@ class URLRequest(BaseModel):
 # EMBEDDING CONFIG
 # -----------------------------
 # NOTE: fake embeddings for demo purposes only
-EMBED_MODEL = "mock-384"   # since you're still using fake embeddings
+EMBED_MODEL = "mock-384"   # since we are still using fake embeddings
 EMBED_VERSION = 1
 
 # -----------------------------
@@ -87,8 +87,10 @@ def normalize(vec):
     return (v / np.linalg.norm(v)).tolist()
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
-    # 🔥 Replace with actual Groq embedding model when available
-    # TEMP fallback (deterministic fake but stable)
+
+    # 13-04-2026 - Generate deterministic fake embeddings based on text hash
+    # It does not understand semantics, but allows us to test the full pipeline without 
+    # calling an actual embedding model like Hugging Face by Inference API with a API Key
     vectors = []
     for text in texts:
         np.random.seed(abs(hash(text)) % (10**6))
