@@ -34,7 +34,7 @@ if not DATABASE_URL:
 app = FastAPI(
 
     title="Python + FastApi + JWT Auth + RAG Pipeline + Fake embeddings",
-    description="13-04-2026 - FastAPI with JWT Auth serving an RAG Application powered by Groq + Fake embeddings",
+    description="15-04-2026 - FastAPI with JWT Auth serving an RAG Application powered by Groq + Fake embeddings",
     version="0.0.1",
 
     contact={
